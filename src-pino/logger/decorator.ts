@@ -1,10 +1,5 @@
-import {
-  useLogger,
-  runWithLoggingContext,
-  type LogContext,
-  type LoggingContextOptions,
-} from './logging-context';
-export { useLogger };
+import type { LogContext, LoggingContextOptions } from './types';
+import { runWithLoggingContext } from './context';
 
 export function UseLoggingContext(
   defaultContext?: LogContext,

@@ -4,13 +4,12 @@ import {
   createHttpLoggerContext,
   runWithLoggerStore,
   useLogger,
-} from './logging-context';
+} from './context';
 
 @Injectable()
 export class LoggingContextMiddleware implements NestMiddleware {
   use(req: Request, res: Response, next: NextFunction) {
-    const requestId =
-      req.header('x-request-id') ?? crypto.randomUUID();
+    const requestId = req.header('x-request-id') ?? crypto.randomUUID();
 
     const store = createHttpLoggerContext({
       requestId,

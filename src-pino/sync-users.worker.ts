@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { useLogger } from './use-logging-context.decorator';
+import { useLogger } from './logger';
 
 @Injectable()
 export class SyncUsersWorker {

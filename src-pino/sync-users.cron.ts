@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
-import { UseLoggingContext, useLogger } from './use-logging-context.decorator';
+import { UseLoggingContext, useLogger } from './logger';
 import { SyncUsersWorker } from './sync-users.worker';
 
 @Injectable()

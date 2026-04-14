@@ -1,6 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { createHttpError } from './app-error';
-import { useLogger } from './logging-context';
+import { createHttpError, useLogger } from './logger';
 
 type UserProfile = {
   id: string;
@@ -57,7 +56,6 @@ export class AppService {
       status: 500,
       why: 'Upstream profile API returned malformed payload',
       fix: 'Retry and validate the upstream schema before mapping',
-      link: 'https://docs.example.com/sync/users',
     });
   }
 
@@ -70,7 +68,6 @@ export class AppService {
       status: 402,
       why: 'Card declined by issuer',
       fix: 'Try a different payment method',
-      link: 'https://docs.example.com/payments/declined',
     });
   }
 

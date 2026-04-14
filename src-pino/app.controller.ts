@@ -1,6 +1,6 @@
 import { Controller, Get, Param } from '@nestjs/common';
 import { AppService } from './app.service';
-import { useLogger } from './logging-context';
+import { useLogger } from './logger';
 
 @Controller()
 export class AppController {

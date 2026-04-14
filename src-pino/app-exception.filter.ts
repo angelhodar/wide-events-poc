@@ -1,28 +1,25 @@
 import { Catch } from '@nestjs/common';
 import type { ArgumentsHost, ExceptionFilter } from '@nestjs/common';
-import { parseAppError } from './app-error';
-import { useLogger } from './logging-context';
+import type { Request, Response } from 'express';
+import { toProblemDetail, useLogger } from './logger';
 
 @Catch()
 export class AppExceptionFilter implements ExceptionFilter {
   catch(exception: unknown, host: ArgumentsHost) {
-    const response = host.switchToHttp().getResponse();
-    const error =
-      exception instanceof Error ? exception : new Error(String(exception));
+    const http = host.switchToHttp();
+    const req = http.getRequest<Request>();
+    const res = http.getResponse<Response>();
+
+    const error = exception instanceof Error ? exception : new Error(String(exception));
 
     try {
       useLogger().error(error);
     } catch {
-      // Logger is unavailable for non-http or out-of-scope contexts.
+      // Logger is unavailable outside a request context (e.g. bootstrap errors).
     }
 
-    const parsed = parseAppError(error);
+    const problem = toProblemDetail(error, req.originalUrl || req.url);
 
-    response.status(parsed.status).json({
-      message: parsed.message,
-      why: parsed.why,
-      fix: parsed.fix,
-      link: parsed.link,
-    });
+    res.status(problem.status).type('application/problem+json').json(problem);
   }
 }
