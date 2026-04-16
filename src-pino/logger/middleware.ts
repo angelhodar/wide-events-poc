@@ -1,7 +1,7 @@
 import { Injectable, type NestMiddleware } from '@nestjs/common';
 import type { NextFunction, Request, Response } from 'express';
 import {
-  createHttpLoggerContext,
+  createStore,
   runWithLoggerStore,
   useLogger,
 } from './context';
@@ -11,7 +11,7 @@ export class LoggingContextMiddleware implements NestMiddleware {
   use(req: Request, res: Response, next: NextFunction) {
     const requestId = req.header('x-request-id') ?? crypto.randomUUID();
 
-    const store = createHttpLoggerContext({
+    const store = createStore({
       requestId,
       method: req.method,
       path: req.originalUrl || req.url,
@@ -19,13 +19,8 @@ export class LoggingContextMiddleware implements NestMiddleware {
 
     runWithLoggerStore(store, () => {
       res.on('finish', () => {
-        try {
-          useLogger().emit({ status: res.statusCode });
-        } catch {
-          // The response may finish outside the expected context lifecycle.
-        }
+        useLogger().emit({ status: res.statusCode });
       });
-
       next();
     });
   }

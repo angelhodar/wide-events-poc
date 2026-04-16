@@ -1,8 +1,8 @@
-import type { LogContext, LoggingContextOptions } from './types';
+import type { LoggingContextOptions, WideEvent } from './types';
 import { runWithLoggingContext } from './context';
 
 export function UseLoggingContext(
-  defaultContext?: LogContext,
+  defaultContext?: WideEvent,
   options?: LoggingContextOptions,
 ): MethodDecorator {
   return (_target, _propertyKey, descriptor: PropertyDescriptor) => {

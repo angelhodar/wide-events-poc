@@ -17,7 +17,7 @@ export class EvlogExceptionFilter implements ExceptionFilter {
     }
 
     const parsed = parseError(error);
-    
+
     response.status(parsed.status).json({
       message: parsed.message,
       why: parsed.why,

@@ -51,11 +51,14 @@ export class AppService {
     const log = useLogger();
     log.set({ sync: { userId: id, step: 'upsert-user' } });
 
+    const error = new Error("Fail")
+
     throw createHttpError({
       message: 'User sync failed',
       status: 500,
       why: 'Upstream profile API returned malformed payload',
       fix: 'Retry and validate the upstream schema before mapping',
+      cause: error
     });
   }
 

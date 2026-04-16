@@ -1,101 +1,58 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import type { LogContext, LoggingContextOptions } from './types';
+import type {
+  LoggingContextOptions,
+  WideEvent,
+  LoggingStore,
+  LoggerFacade,
+} from './types';
 import { serializeError } from './error';
-import { logDirect } from './core';
-
-type LogLevel = 'info' | 'warn' | 'error';
-
-type RequestLog = {
-  level: 'info' | 'warn';
-  message: string;
-};
-
-type LoggerFacade = {
-  set(data: LogContext): void;
-  info(message: string, context?: LogContext): void;
-  warn(message: string, context?: LogContext): void;
-  error(error: Error | string, context?: LogContext): void;
-  emit(overrides?: LogContext): void;
-  getContext(): LogContext;
-};
-
-type LoggingStore = {
-  context: LogContext;
-  startedAt: number;
-  hasWarn: boolean;
-  hasError: boolean;
-  emitted: boolean;
-  requestLogs: RequestLog[];
-  facade: LoggerFacade;
-};
+import { log } from './core';
+import { mergeInto } from './helpers';
 
 const storage = new AsyncLocalStorage<LoggingStore>();
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
+type BuildFacadeOptions = Omit<LoggingStore, 'facade'>
 
-function mergeInto(target: LogContext, source: LogContext) {
-  for (const [key, value] of Object.entries(source)) {
-    if (value === undefined || value === null) continue;
-
-    const current = target[key];
-    if (isPlainObject(current) && isPlainObject(value)) {
-      mergeInto(current, value);
-      continue;
-    }
-
-    target[key] = value;
-  }
-}
-
-function buildFacade(store: LoggingStore): LoggerFacade {
+function buildFacade(store: BuildFacadeOptions): LoggerFacade {
   return {
-    set(data: LogContext) {
+    set(data: WideEvent) {
       mergeInto(store.context, data);
     },
 
-    info(message: string, context?: LogContext) {
+    info(message: string, context?: WideEvent) {
       if (context) mergeInto(store.context, context);
-      store.requestLogs.push({ level: 'info', message });
+      void message;
     },
 
-    warn(message: string, context?: LogContext) {
-      store.hasWarn = true;
+    warn(message: string, context?: WideEvent) {
+      store.level = 'warn';
       if (context) mergeInto(store.context, context);
-      store.requestLogs.push({ level: 'warn', message });
+      void message;
     },
 
-    error(error: Error | string, context?: LogContext) {
-      store.hasError = true;
+    error(error: Error | string, context?: WideEvent) {
+      store.level = 'error';
       if (context) mergeInto(store.context, context);
       const err = typeof error === 'string' ? new Error(error) : error;
       mergeInto(store.context, { error: serializeError(err) });
     },
 
-    emit(overrides?: LogContext) {
+    emit(overrides?: WideEvent) {
       if (store.emitted) return;
+
       store.emitted = true;
 
-      const level: LogLevel = store.hasError
-        ? 'error'
-        : store.hasWarn
-          ? 'warn'
-          : 'info';
+      const { message, ...ctx } = store.context
 
-      const event: LogContext = {
-        ...store.context,
-        durationMs: Date.now() - store.startedAt,
+      const event: WideEvent = {
+        ctx,
+        message,
+        duration: Date.now() - store.startedAt,
       };
-
-      if (store.requestLogs.length > 0) {
-        event.requestLogs = store.requestLogs;
-      }
 
       if (overrides) mergeInto(event, overrides);
 
-      // logDirect routes to drain if configured, otherwise to pino
-      logDirect(level, event, 'wide-event');
+      log(store.level, event);
     },
 
     getContext() {
@@ -104,17 +61,20 @@ function buildFacade(store: LoggingStore): LoggerFacade {
   };
 }
 
-function createStore(initialContext?: LogContext): LoggingStore {
-  const store: LoggingStore = {
+// Exported for middleware and advanced integrations.
+export function createStore(initialContext?: WideEvent): LoggingStore {
+  const base = {
     context: { ...(initialContext ?? {}) },
     startedAt: Date.now(),
-    hasWarn: false,
-    hasError: false,
+    level: 'info',
     emitted: false,
-    requestLogs: [],
-    facade: null as unknown as LoggerFacade,
+  } satisfies BuildFacadeOptions;
+
+  const store: LoggingStore = {
+    ...base,
+    facade: buildFacade(base),
   };
-  store.facade = buildFacade(store);
+
   return store;
 }
 
@@ -134,21 +94,9 @@ export function runWithLoggerStore<T>(store: LoggingStore, fn: () => T): T {
   return storage.run(store, fn);
 }
 
-export function createHttpLoggerContext(input: {
-  requestId: string;
-  method: string;
-  path: string;
-}): LoggingStore {
-  return createStore({
-    requestId: input.requestId,
-    method: input.method,
-    path: input.path,
-  });
-}
-
 export async function runWithLoggingContext<T>(
   fn: () => Promise<T>,
-  defaultContext?: LogContext,
+  defaultContext?: WideEvent,
   options?: LoggingContextOptions,
 ): Promise<T | undefined> {
   const store = createStore(defaultContext);
@@ -167,6 +115,3 @@ export async function runWithLoggingContext<T>(
     }
   });
 }
-
-// Exported only for use by middleware — not part of the public app API
-export type { LoggingStore };

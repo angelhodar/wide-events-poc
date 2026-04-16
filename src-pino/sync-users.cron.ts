@@ -25,7 +25,5 @@ export class SyncUsersCron {
         status: 'ok',
       },
     });
-
-    throw new Error('Error');
   }
 }

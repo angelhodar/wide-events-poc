@@ -6,11 +6,9 @@ export { AppError, createError, HttpError, createHttpError, serializeError, pars
 export type { ErrorCtx, SerializedError, ProblemDetail } from './error';
 
 // Types
-export type { LogContext, LoggingContextOptions, DrainFunction } from './types';
+export type { WideEvent, LoggingContextOptions } from './types';
 
 // NestJS wiring
 export { LoggingContextMiddleware } from './middleware';
 export { UseLoggingContext } from './decorator';
 export { NestLogger } from './nest-logger';
-
-export { configureDrain } from './core';

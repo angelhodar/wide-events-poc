@@ -42,7 +42,9 @@ export function UseLoggingContext(
   options?: LoggingContextOptions,
 ): MethodDecorator {
   return (_target, _propertyKey, descriptor: PropertyDescriptor) => {
-    const original = descriptor.value as (...args: unknown[]) => Promise<unknown>;
+    const original = descriptor.value as (
+      ...args: unknown[]
+    ) => Promise<unknown>;
 
     descriptor.value = async function (...args: unknown[]) {
       return runWithLoggingContext(

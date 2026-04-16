@@ -5,7 +5,8 @@ import { AppModule } from './app.module';
 import { EvlogExceptionFilter } from './evlog-exception.filter';
 
 initLogger({
-  env: { service: process.env.EVLOG_SERVICE ?? 'nestjs-evlog' }, pretty: true,
+  env: { service: process.env.EVLOG_SERVICE ?? 'nestjs-evlog' },
+  pretty: true,
 });
 
 async function bootstrap() {
