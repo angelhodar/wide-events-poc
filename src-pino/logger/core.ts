@@ -1,13 +1,17 @@
 import pino from 'pino';
 import type { WideEvent, LogLevel } from './types';
+import { prettyPrint } from './pretty';
+
+const isDev = process.env.NODE_ENV !== 'production';
 
 const logger = pino({
   messageKey: 'message',
-  transport: {
-    target: 'pino-pretty',
+  formatters: {
+    level: (label) => ({ status: label }),
   },
 });
 
 export function log(level: LogLevel, data: WideEvent): void {
-  logger[level](data);
+  if (isDev) prettyPrint(level, data);
+  else logger[level](data);
 }

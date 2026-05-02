@@ -1,7 +1,7 @@
 import { Catch } from '@nestjs/common';
 import type { ArgumentsHost, ExceptionFilter } from '@nestjs/common';
 import type { Request, Response } from 'express';
-import { toProblemDetail, useLogger } from './logger';
+import { ProblemDetail, useLogger } from './logger';
 
 @Catch()
 export class AppExceptionFilter implements ExceptionFilter {
@@ -18,8 +18,8 @@ export class AppExceptionFilter implements ExceptionFilter {
       // Logger is unavailable outside a request context (e.g. bootstrap errors).
     }
 
-    const problem = toProblemDetail(error, req.originalUrl || req.url);
+    const problem = ProblemDetail.from(error, req.originalUrl || req.url);
 
-    res.status(problem.status).type('application/problem+json').json(problem);
+    res.status(problem.status).json(problem.toJSON());
   }
 }

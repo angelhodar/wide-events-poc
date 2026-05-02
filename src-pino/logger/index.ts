@@ -2,8 +2,8 @@
 export { useLogger, runWithLoggingContext } from './context';
 
 // Errors
-export { AppError, createError, HttpError, createHttpError, serializeError, parseAppError, toProblemDetail } from './error';
-export type { ErrorCtx, SerializedError, ProblemDetail } from './error';
+export { AppError, ProblemDetail, serializeError } from './error';
+export type { SerializedError } from './error';
 
 // Types
 export type { WideEvent, LoggingContextOptions } from './types';

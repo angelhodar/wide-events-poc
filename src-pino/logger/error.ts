@@ -1,54 +1,102 @@
-export type ErrorCtx = {
-  why: string;
-  fix: string;
-};
-
 export type SerializedError = {
   message: string;
   kind: string;
   stack: string | undefined;
-  ctx?: ErrorCtx;
+  why?: string;
+  fix?: string;
   status?: number;
   cause?: SerializedError;
 };
 
-type CreateErrorParams = {
+type AppErrorParams = {
   message: string;
   why: string;
   fix: string;
   cause?: Error;
 };
 
-type CreateHttpErrorParams = CreateErrorParams & {
-  status?: number;
-};
-
 export class AppError extends Error {
-  ctx: ErrorCtx;
+  why: string;
+  fix: string;
 
-  constructor(params: CreateErrorParams) {
+  constructor(params: AppErrorParams) {
     super(params.message, { cause: params.cause });
     this.name = 'AppError';
-    this.ctx = { why: params.why, fix: params.fix };
+    this.why = params.why;
+    this.fix = params.fix;
   }
 }
 
-export class HttpError extends AppError {
+type ProblemDetailParams = {
+  title: string;
   status: number;
+  why: string;
+  fix: string;
+  instance?: string;
+  type?: string;
+  cause?: Error;
+};
 
-  constructor(params: CreateHttpErrorParams) {
-    super(params);
-    this.name = 'HttpError';
-    this.status = params.status ?? 500;
+export class ProblemDetail extends AppError {
+  status: number;
+  instance?: string;
+  type?: string;
+
+  constructor(params: ProblemDetailParams) {
+    super({ message: params.title, why: params.why, fix: params.fix, cause: params.cause });
+    this.name = 'ProblemDetail';
+    this.status = params.status;
+    this.instance = params.instance;
+    this.type = params.type;
   }
-}
 
-export function createError(params: CreateErrorParams): AppError {
-  return new AppError(params);
-}
+  toJSON() {
+    return {
+      type: this.type,
+      title: this.message,
+      status: this.status,
+      detail: this.why,
+      fix: this.fix,
+      instance: this.instance,
+    };
+  }
 
-export function createHttpError(params: CreateHttpErrorParams): HttpError {
-  return new HttpError(params);
+  static from(error: unknown, instance?: string): ProblemDetail {
+    if (error instanceof ProblemDetail) {
+      error.instance = instance;
+      return error;
+    }
+
+    if (error instanceof AppError) {
+      return new ProblemDetail({
+        title: error.message,
+        status: 500,
+        why: error.why,
+        fix: error.fix,
+        instance,
+        cause: error,
+      });
+    }
+
+    if (error instanceof Error) {
+      return new ProblemDetail({
+        title: error.message,
+        status: 500,
+        why: 'An unexpected error occurred',
+        fix: 'Contact support if the problem persists',
+        instance,
+        cause: error,
+      });
+    }
+
+    return new ProblemDetail({
+      title: String(error),
+      status: 500,
+      why: 'An unexpected error occurred',
+      fix: 'Contact support if the problem persists',
+      instance,
+    });
+  }
 }
 
 export function serializeError(err: Error): SerializedError {
@@ -58,11 +106,13 @@ export function serializeError(err: Error): SerializedError {
     stack: err.stack,
   };
 
-  if (err instanceof HttpError) {
-    result.ctx = err.ctx;
+  if (err instanceof ProblemDetail) {
+    result.why = err.why;
+    result.fix = err.fix;
     result.status = err.status;
   } else if (err instanceof AppError) {
-    result.ctx = err.ctx;
+    result.why = err.why;
+    result.fix = err.fix;
   }
 
   if (err.cause instanceof Error) {
@@ -70,55 +120,4 @@ export function serializeError(err: Error): SerializedError {
   }
 
   return result;
-}
-
-export type ProblemDetail = {
-  type?: string;
-  title: string;
-  status: number;
-  detail?: string;   // why — root cause explanation
-  instance?: string; // request path
-  fix?: string;      // remediation guidance (RFC 7807 extension)
-};
-
-export function toProblemDetail(error: unknown, instance?: string): ProblemDetail {
-  const parsed = parseAppError(error);
-  return {
-    title: parsed.message,
-    status: parsed.status,
-    detail: parsed.why,
-    instance,
-    fix: parsed.fix,
-  };
-}
-
-export function parseAppError(error: unknown): {
-  message: string;
-  status: number;
-  why?: string;
-  fix?: string;
-} {
-  if (error instanceof HttpError) {
-    return {
-      message: error.message,
-      status: error.status,
-      why: error.ctx.why,
-      fix: error.ctx.fix,
-    };
-  }
-
-  if (error instanceof AppError) {
-    return {
-      message: error.message,
-      status: 500,
-      why: error.ctx.why,
-      fix: error.ctx.fix,
-    };
-  }
-
-  if (error instanceof Error) {
-    return { message: error.message, status: 500 };
-  }
-
-  return { message: String(error), status: 500 };
 }

@@ -13,13 +13,15 @@ export class LoggingContextMiddleware implements NestMiddleware {
 
     const store = createStore({
       requestId,
-      method: req.method,
-      path: req.originalUrl || req.url,
+      http: {
+        method: req.method,
+        url: req.originalUrl || req.url,
+      },
     });
 
     runWithLoggerStore(store, () => {
       res.on('finish', () => {
-        useLogger().emit({ status: res.statusCode });
+        useLogger().emit({ http: { status_code: res.statusCode } });
       });
       next();
     });
