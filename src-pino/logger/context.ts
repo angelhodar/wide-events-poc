@@ -5,74 +5,22 @@ import type {
   LoggingStore,
   LoggerFacade,
 } from './types';
-import { serializeError } from './error';
-import { log } from './core';
-import { mergeInto } from './helpers';
+import { createFacade, type FacadeStore } from './facade';
 
 const storage = new AsyncLocalStorage<LoggingStore>();
-
-type BuildFacadeOptions = Omit<LoggingStore, 'facade'>
-
-function buildFacade(store: BuildFacadeOptions): LoggerFacade {
-  return {
-    set(data: WideEvent) {
-      mergeInto(store.context, data);
-    },
-
-    info(message: string, context?: WideEvent) {
-      if (context) mergeInto(store.context, context);
-      void message;
-    },
-
-    warn(message: string, context?: WideEvent) {
-      store.level = 'warn';
-      if (context) mergeInto(store.context, context);
-      void message;
-    },
-
-    error(error: Error | string, context?: WideEvent) {
-      store.level = 'error';
-      if (context) mergeInto(store.context, context);
-      const err = typeof error === 'string' ? new Error(error) : error;
-      mergeInto(store.context, { error: serializeError(err) });
-    },
-
-    emit(overrides?: WideEvent) {
-      if (store.emitted) return;
-
-      store.emitted = true;
-
-      const { message, ...ctx } = store.context
-
-      const event: WideEvent = {
-        ctx,
-        message,
-        duration: Date.now() - store.startedAt,
-      };
-
-      if (overrides) mergeInto(event, overrides);
-
-      log(store.level, event);
-    },
-
-    getContext() {
-      return { ...store.context };
-    },
-  };
-}
 
 // Exported for middleware and advanced integrations.
 export function createStore(initialContext?: WideEvent): LoggingStore {
   const base = {
     context: { ...(initialContext ?? {}) },
-    startedAt: Date.now(),
+    startedAt: performance.now(),
     level: 'info',
     emitted: false,
-  } satisfies BuildFacadeOptions;
+  } satisfies FacadeStore;
 
   const store: LoggingStore = {
     ...base,
-    facade: buildFacade(base),
+    facade: createFacade(base),
   };
 
   return store;

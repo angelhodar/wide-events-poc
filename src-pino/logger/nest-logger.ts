@@ -17,7 +17,12 @@ export class NestLogger implements LoggerService {
       params.length >= 2 && typeof params[0] === 'string'
         ? params[0]
         : undefined;
-    log('error', { message, context, ...(stack && { stack }) });
+    log('error', {
+      message,
+      context,
+      // Datadog Error Tracking expects stack traces under error.stack.
+      ...(stack && { error: { kind: 'Error', message, stack } }),
+    });
   }
 }
 

@@ -1,108 +1,181 @@
+import type pino from 'pino';
 import type { LogLevel, WideEvent } from './types';
 import type { SerializedError } from './error';
 
-const c = {
+const color = {
   reset: '\x1B[0m',
   dim: '\x1B[2m',
   red: '\x1B[31m',
   green: '\x1B[32m',
   yellow: '\x1B[33m',
   cyan: '\x1B[36m',
-  gray: '\x1B[90m',
 };
 
 const levelColor: Record<LogLevel, string> = {
-  info: c.cyan,
-  warn: c.yellow,
-  error: c.red,
+  info: color.cyan,
+  warn: color.yellow,
+  error: color.red,
 };
 
+const systemFields = new Set([
+  'ctx',
+  'dd',
+  'duration',
+  'hostname',
+  'http',
+  'level',
+  'message',
+  'pid',
+  'status',
+  'time',
+]);
+
+type PrettyEvent = WideEvent & {
+  ctx?: Record<string, unknown>;
+  duration?: number;
+  http?: Record<string, unknown>;
+  status?: LogLevel | string;
+  time?: number | string;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 function isSerializedError(value: unknown): value is SerializedError {
-  return typeof value === 'object' && value !== null && 'kind' in value && 'message' in value;
-}
-
-function formatStack(stack: string | undefined): string | undefined {
-  if (!stack) return undefined;
-  const frames = stack.split('\n').slice(1); // drop the "Error: message" first line
-  const appFrames = frames.filter((f) => !f.includes('node_modules'));
-  const relevant = appFrames.length > 0 ? appFrames.slice(0, 2) : frames.slice(0, 2);
-  return relevant.map((f) => f.trim()).join('\n');
-}
-
-function printError(err: SerializedError, indent: string): void {
-  console.log(`${indent}${c.red}${err.kind}:${c.reset} ${err.message}`);
-  if (err.why)  console.log(`${indent}  ${c.dim}why:${c.reset} ${err.why}`);
-  if (err.fix)  console.log(`${indent}  ${c.dim}fix:${c.reset} ${err.fix}`);
-  const stack = formatStack(err.stack);
-  if (stack) console.log(`${indent}  ${c.dim}${stack}${c.reset}`);
-  if (err.cause) {
-    console.log(`${indent}  ${c.dim}caused by:${c.reset}`);
-    printError(err.cause, indent + '    ');
-  }
+  return isRecord(value) && 'kind' in value && 'message' in value;
 }
 
 function formatValue(value: unknown): string {
   if (value === null || value === undefined) return String(value);
+  if (Array.isArray(value)) return JSON.stringify(value);
 
-  if (typeof value === 'object') {
-    const pairs: string[] = [];
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      if (v === undefined || v === null) continue;
-      pairs.push(typeof v === 'object' ? `${k}=${JSON.stringify(v)}` : `${k}=${v}`);
-    }
-    return pairs.join(' ');
+  if (isRecord(value)) {
+    return Object.entries(value)
+      .filter(([, v]) => v !== undefined && v !== null)
+      .map(([k, v]) =>
+        isRecord(v) || Array.isArray(v)
+          ? `${k}=${JSON.stringify(v)}`
+          : `${k}=${v}`,
+      )
+      .join(' ');
   }
-  
+
   return String(value);
 }
 
-export function prettyPrint(level: LogLevel, event: WideEvent): void {
-  // Flatten the ctx wrapper that context.ts emits for structured JSON logging
-  const flat: Record<string, unknown> = { ...event };
+function formatTime(value: unknown): string {
+  const date =
+    typeof value === 'number' || typeof value === 'string'
+      ? new Date(value)
+      : new Date();
 
-  if (flat.ctx && typeof flat.ctx === 'object' && !Array.isArray(flat.ctx)) {
-    Object.assign(flat, flat.ctx);
-    delete flat.ctx;
+  if (Number.isNaN(date.getTime()))
+    return new Date().toISOString().slice(11, 23);
+  return date.toISOString().slice(11, 23);
+}
+
+function formatDuration(value: number): string {
+  // Production keeps Datadog's nanosecond convention; humans read milliseconds.
+  const ms = value / 1_000_000;
+  return Number.isInteger(ms) ? `${ms}ms` : `${ms.toFixed(2)}ms`;
+}
+
+function stackPreview(stack: string | undefined): string[] {
+  if (!stack) return [];
+
+  const frames = stack
+    .split('\n')
+    .slice(1) // drop the "Error: message" first line
+    .map((frame) => frame.trim())
+    .filter(Boolean);
+
+  const appFrames = frames.filter((frame) => !frame.includes('node_modules'));
+  return (appFrames.length > 0 ? appFrames : frames).slice(0, 2);
+}
+
+function pushError(
+  lines: string[],
+  err: SerializedError,
+  indent: string,
+): void {
+  lines.push(`${indent}${color.red}${err.kind}:${color.reset} ${err.message}`);
+  if (err.why)
+    lines.push(`${indent}  ${color.dim}why:${color.reset} ${err.why}`);
+  if (err.fix)
+    lines.push(`${indent}  ${color.dim}fix:${color.reset} ${err.fix}`);
+
+  for (const frame of stackPreview(err.stack)) {
+    lines.push(`${indent}  ${color.dim}${frame}${color.reset}`);
   }
 
-  const { message, http, duration, ...rest } = flat as {
-    message?: string;
-    http?: { method?: string; url?: string; status_code?: number };
-    duration?: number;
-    [key: string]: unknown;
-  };
+  if (err.cause) {
+    lines.push(`${indent}  ${color.dim}caused by:${color.reset}`);
+    pushError(lines, err.cause, `${indent}    `);
+  }
+}
 
-  const ts = new Date().toISOString().slice(11, 23);
-  const lc = levelColor[level] ?? c.reset;
-  const service = process.env.SERVICE_NAME ?? 'app';
+export function prettyPrint(event: PrettyEvent): void {
+  const level = (event.status ?? 'info') as LogLevel;
+  const service = process.env.DD_SERVICE ?? process.env.SERVICE_NAME ?? 'app';
+  const http = isRecord(event.http) ? event.http : undefined;
+  const fields: [string, unknown][] = [];
 
-  let header = `${c.dim}${ts}${c.reset} ${lc}${level.toUpperCase()}${c.reset} ${c.cyan}[${service}]${c.reset}`;
+  let header = `${color.dim}${formatTime(event.time)}${color.reset} ${levelColor[level] ?? color.reset}${String(level).toUpperCase()}${color.reset} ${color.cyan}[${service}]${color.reset}`;
 
-  if (http?.method && http?.url) header += ` ${http.method} ${http.url}`;
-
-  if (http?.status_code !== undefined) {
-    const sc = http.status_code >= 400 ? c.red : c.green;
-    header += ` ${sc}${http.status_code}${c.reset}`;
+  if (typeof http?.method === 'string' && typeof http.url === 'string') {
+    header += ` ${http.method} ${http.url}`;
   }
 
-  if (duration !== undefined) {
-    header += ` ${c.dim}in ${duration}ms${c.reset}`;
+  if (typeof http?.status_code === 'number') {
+    const statusColor = http.status_code >= 400 ? color.red : color.green;
+    header += ` ${statusColor}${http.status_code}${color.reset}`;
   }
 
-  if (message) header += ` ${c.dim}${message}${c.reset}`;
+  if (event.duration !== undefined) {
+    header += ` ${color.dim}in ${formatDuration(event.duration)}${color.reset}`;
+  }
 
-  console.log(header);
+  if (event.message) header += ` ${color.dim}${event.message}${color.reset}`;
 
-  const entries = Object.entries(rest).filter(([, v]) => v !== undefined);
-  const last = entries.length - 1;
-
-  entries.forEach(([key, value], i) => {
-    const prefix = i === last ? '└─' : '├─';
-    if (isSerializedError(value)) {
-      console.log(`  ${c.dim}${prefix}${c.reset} ${c.cyan}${key}:${c.reset}`);
-      printError(value, '      ');
-    } else {
-      console.log(`  ${c.dim}${prefix}${c.reset} ${c.cyan}${key}:${c.reset} ${formatValue(value)}`);
+  if (event.ctx) {
+    for (const [key, value] of Object.entries(event.ctx)) {
+      if (value !== undefined) fields.push([key, value]);
     }
-  });
+  }
+
+  for (const [key, value] of Object.entries(event)) {
+    if (!systemFields.has(key) && value !== undefined)
+      fields.push([key, value]);
+  }
+
+  const lines = [header];
+
+  for (const [index, [key, value]] of fields.entries()) {
+    const prefix = index === fields.length - 1 ? '└─' : '├─';
+    lines.push(
+      `  ${color.dim}${prefix}${color.reset} ${color.cyan}${key}:${color.reset}`,
+    );
+
+    if (isSerializedError(value)) {
+      pushError(lines, value, '      ');
+    } else {
+      lines[lines.length - 1] += ` ${formatValue(value)}`;
+    }
+  }
+
+  process.stdout.write(`${lines.join('\n')}\n`);
+}
+
+export function createPrettyDestination(): pino.DestinationStream {
+  return {
+    write(line: string) {
+      try {
+        // Pretty-print the exact JSON pino produced, including formatters/hooks.
+        prettyPrint(JSON.parse(line) as PrettyEvent);
+      } catch {
+        process.stdout.write(line.endsWith('\n') ? line : `${line}\n`);
+      }
+    },
+  };
 }

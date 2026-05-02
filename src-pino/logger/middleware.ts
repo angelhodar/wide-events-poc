@@ -1,10 +1,6 @@
 import { Injectable, type NestMiddleware } from '@nestjs/common';
 import type { NextFunction, Request, Response } from 'express';
-import {
-  createStore,
-  runWithLoggerStore,
-  useLogger,
-} from './context';
+import { createStore, runWithLoggerStore, useLogger } from './context';
 
 @Injectable()
 export class LoggingContextMiddleware implements NestMiddleware {
@@ -12,9 +8,10 @@ export class LoggingContextMiddleware implements NestMiddleware {
     const requestId = req.header('x-request-id') ?? crypto.randomUUID();
 
     const store = createStore({
-      requestId,
       http: {
         method: req.method,
+        // Datadog's HTTP namespace uses snake_case for this field.
+        request_id: requestId,
         url: req.originalUrl || req.url,
       },
     });
