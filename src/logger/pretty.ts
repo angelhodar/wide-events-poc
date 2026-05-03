@@ -34,7 +34,7 @@ type PrettyEvent = WideEvent & {
   ctx?: Record<string, unknown>;
   duration?: number;
   http?: Record<string, unknown>;
-  status?: LogLevel | string;
+  status?: string;
   time?: number | string;
 };
 
@@ -56,12 +56,12 @@ function formatValue(value: unknown): string {
       .map(([k, v]) =>
         isRecord(v) || Array.isArray(v)
           ? `${k}=${JSON.stringify(v)}`
-          : `${k}=${v}`,
+          : `${k}=${String(v)}`,
       )
       .join(' ');
   }
 
-  return String(value);
+  return String(value as string | number | boolean | symbol | bigint);
 }
 
 function formatTime(value: unknown): string {
@@ -70,9 +70,8 @@ function formatTime(value: unknown): string {
       ? new Date(value)
       : new Date();
 
-  if (Number.isNaN(date.getTime()))
-    return new Date().toISOString().slice(11, 23);
-  return date.toISOString().slice(11, 23);
+  if (Number.isNaN(date.getTime())) return formatTime(Date.now());
+  return date.toLocaleTimeString('en-GB', { hour12: false });
 }
 
 function formatDuration(value: number): string {

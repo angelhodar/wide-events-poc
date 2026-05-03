@@ -19,4 +19,3 @@ export function mergeInto(target: WideEvent, source: WideEvent) {
     target[key] = value;
   }
 }
-

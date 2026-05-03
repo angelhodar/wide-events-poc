@@ -11,8 +11,8 @@ export function UseLoggingContext(
     ) => Promise<unknown>;
 
     descriptor.value = async function (...args: unknown[]) {
-      return runWithLoggingContext(
-        () => original.apply(this, args),
+      return runWithLoggingContext<unknown>(
+        () => original.apply(this, args) as Promise<unknown>,
         defaultContext,
         options,
       );

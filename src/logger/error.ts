@@ -43,7 +43,12 @@ export class ProblemDetail extends AppError {
   type?: string;
 
   constructor(params: ProblemDetailParams) {
-    super({ message: params.title, why: params.why, fix: params.fix, cause: params.cause });
+    super({
+      message: params.title,
+      why: params.why,
+      fix: params.fix,
+      cause: params.cause,
+    });
     this.name = 'ProblemDetail';
     this.status = params.status;
     this.instance = params.instance;

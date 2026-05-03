@@ -1,6 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { createError } from 'evlog';
-import { useLogger } from 'evlog/nestjs';
+import { ProblemDetail, useLogger } from './logger';
 
 type UserProfile = {
   id: string;
@@ -52,12 +51,14 @@ export class AppService {
     const log = useLogger();
     log.set({ sync: { userId: id, step: 'upsert-user' } });
 
-    throw createError({
-      message: 'User sync failed',
+    const error = new Error('Fail');
+
+    throw new ProblemDetail({
+      title: 'User sync failed',
       status: 500,
       why: 'Upstream profile API returned malformed payload',
       fix: 'Retry and validate the upstream schema before mapping',
-      link: 'https://docs.example.com/sync/users',
+      cause: error,
     });
   }
 
@@ -65,12 +66,11 @@ export class AppService {
     const log = useLogger();
     log.set({ checkout: { step: 'charge' } });
 
-    throw createError({
-      message: 'Payment failed',
+    throw new ProblemDetail({
+      title: 'Payment failed',
       status: 402,
       why: 'Card declined by issuer',
       fix: 'Try a different payment method',
-      link: 'https://docs.example.com/payments/declined',
     });
   }
 
