@@ -1,14 +1,16 @@
-# Technical Proposal: Adopting Wide Event Logging
+# Technical Proposal: Adopting Wide Event Logging with Pino
 
 **Author:** Angel
-**Date:** April 2026
-**Status:** Draft — Pending Review
+**Date:** May 2026
+**Status:** Draft - Pending Review
 
 ---
 
 ## Executive Summary
 
-This proposal recommends adopting the **Wide Event** logging pattern as the company-wide observability standard. Under this model, each logical unit of work — whether an HTTP request, a Kafka consumer message, a queue handler or a scheduled job — emits a single, richly structured JSON log event at completion rather than multiple disconnected lines throughout execution. The change will enforce a consistent logging style across all teams and repositories, simplify debugging, and reduce Datadog indexing costs.
+This proposal recommends adopting the **Wide Event** logging pattern as the company-wide observability standard. Under this model, each logical unit of work, whether an HTTP request, Kafka consumer message, queue handler, or scheduled job, emits a single structured JSON log event at completion rather than multiple disconnected lines throughout execution.
+
+The current proof of concept implements this pattern in `src/logger` using a small company-owned facade backed by **Pino**. Application code accumulates context through `useLogger().set(...)`; the logger emits once at the end of the unit of work; and the final JSON shape is optimized for Datadog indexing, error tracking, and cross-service querying.
 
 ---
 
@@ -16,91 +18,180 @@ This proposal recommends adopting the **Wide Event** logging pattern as the comp
 
 Our current logging setup, while functional, has two structural weaknesses that compound as the number of services and teams grows.
 
-**Lack of enforced structure.** All teams share the same underlying logger, and severity levels are consistent. However, the logger does not enforce a standard for field names, formatting conventions, or how much context should accompany a given log entry. Developers are free to log as much or as little as they choose, and the result is that a single unit of work may produce anywhere from one to a few log lines depending on who wrote the code. When debugging, engineers must manually correlate these scattered entries — even when distributed traces are available — because the logs themselves lack the structured context needed to tell a complete story.
+**Lack of enforced structure.** All teams share the same underlying logger, and severity levels are consistent. However, the logger does not enforce a standard for field names, formatting conventions, or how much context should accompany a given log entry. Developers are free to log as much or as little as they choose, and the result is that a single unit of work may produce anywhere from one to many log lines depending on who wrote the code. When debugging, engineers must manually correlate scattered entries because the logs themselves lack the structured context needed to tell a complete story.
 
-**No standard for error reporting.** When errors occur, the information captured alongside them varies widely. Some log entries include a stack trace and relevant identifiers; others contain only a message string. There is no mechanism that forces errors to be reported in a structured, queryable format with consistent fields like root cause, affected user, or suggested remediation. Also, Datadog usually preserves just the main stack trace and doesn't provide more traces in case several errors are thrown using the `cause` prop for the `Error` class.
+**No standard for error reporting.** When errors occur, the information captured alongside them varies widely. Some log entries include a stack trace and relevant identifiers; others contain only a message string. There is no mechanism that consistently reports errors with fields like root cause, remediation, HTTP status, and cause chain. Datadog also commonly preserves only the primary stack trace, which makes nested `Error.cause` chains difficult to inspect unless we serialize them ourselves.
 
 ---
 
 ## 2. Proposed Solution: Wide Events
 
-A Wide Event is a single JSON log entry emitted once at the end of a unit of work. Throughout execution, contextual data — user identity, subscription tier, feature flags, query durations, payload metadata — is silently accumulated on an in-memory object. When the operation completes (successfully or with an error), all of that context is flushed as one structured event.
+A Wide Event is a single JSON log entry emitted once at the end of a unit of work. Throughout execution, contextual data such as user identity, route name, worker metadata, downstream dependency details, and domain resource state is accumulated in an AsyncLocalStorage-backed store. When the operation completes successfully or with an error, all accumulated context is flushed as one structured event.
 
-This approach inverts the traditional model: instead of optimizing logs for writing (easy `console.log` calls scattered throughout code), it optimizes for querying — producing flat, high-cardinality JSON that log platforms like Datadog can index and facet natively.
+This approach optimizes logs for querying instead of for writing. Rather than scattering `console.log` calls or short logger lines throughout code, services produce one Datadog-friendly event containing the full operational story.
 
-### 2.1 Tooling
+### 2.1 Runtime Tooling
 
-The library that provides this pattern in a built-in way is **Evlog** ([evlog.dev](https://www.evlog.dev)). Evlog is a zero-dependency, high-performance TypeScript logging library with native integrations for NestJS and other major frameworks. It provides structured error utilities out of the box that enforce a consistent, machine-readable error format across the codebase.
-
-The library is actively maintained with regular releases and a growing ecosystem of framework adapters and drain integrations.
-
-### 2.2 Extending Coverage to Non-HTTP Flows
-
-Evlog's built-in framework integration covers HTTP request lifecycles. A significant portion of our workload, however, runs as Kafka consumers, SQS workers, and cron jobs — all of which fall outside that scope.
-
-To close this gap, I propose a lightweight wrapper using `evlog/toolkit` that leverages Node.js `AsyncLocalStorage` to manage the Wide Event lifecycle for any entry point. `AsyncLocalStorage` is a stable Node.js API with negligible performance impact, and it eliminates the need to pass a logger instance through every function call.
-
-The wrapper exposes two interfaces: a `runWithLoggingContext` function for standalone async work, and a `@UseLoggingContext()` NestJS decorator for class-based entry points.
+The POC uses **Pino** as the only emit path.
 
 ```typescript
-import { createLogger } from 'evlog';
-import { createLoggerStorage } from 'evlog/toolkit';
+const logger = pino(
+  {
+    base: null,
+    messageKey: 'message',
+    formatters: {
+      level: (label) => ({ status: label }),
+    },
+  },
+  process.env.NODE_ENV !== 'production'
+    ? createPrettyDestination()
+    : pino.destination(1),
+);
+```
 
-const { storage, useLogger } = createLoggerStorage('Logger context');
+The implementation intentionally keeps the logging abstraction small:
 
-export { useLogger };
+1. `pino` writes production JSON to stdout for the Datadog Agent.
+2. Development mode uses a custom pretty destination, but it pretty-prints the exact JSON Pino produced.
+3. `base: null` avoids emitting host metadata that can override Datadog Agent attribution.
+4. Pino's level formatter maps log levels to Datadog's `status` field.
+5. The message key is explicitly `message`; the `WideEvent` type prevents accidental use of Pino's default `msg` field.
 
-type LogContext = Record<string, unknown>;
+### 2.2 Logger Module API
 
+The public API exported from `src/logger/index.ts` is:
+
+```typescript
+export { useLogger, runWithLoggingContext } from './context';
+export { AppError, ProblemDetail, serializeError } from './error';
+export type { WideEvent, LoggingContextOptions } from './types';
+export { LoggingContextMiddleware } from './middleware';
+export { UseLoggingContext } from './decorator';
+export { NestLogger } from './nest-logger';
+```
+
+Application code normally uses `useLogger()` inside an active logging context:
+
+```typescript
+const log = useLogger();
+
+log.set({
+  source: { layer: 'controller' },
+  route: { name: 'get-user' },
+  user: { id },
+});
+```
+
+The `LoggerFacade` supports these operations:
+
+```typescript
+type LoggerFacade = {
+  set(data: WideEvent): void;
+  info(message: string, context?: WideEvent): void;
+  warn(message: string, context?: WideEvent): void;
+  error(error: Error | string, context?: WideEvent): void;
+  emit(overrides?: WideEvent): void;
+  getContext(): WideEvent;
+};
+```
+
+`set(...)` is the primary API for accumulating context. It deep-merges plain objects and ignores `null` or `undefined` values. `warn(...)` marks the final event as `warn`. `error(...)` marks the final event as `error` and stores a serialized error. `emit(...)` flushes the event once and ignores later emit attempts for the same context.
+
+### 2.3 Context Lifecycle
+
+The context lifecycle is backed by Node.js `AsyncLocalStorage`.
+
+```typescript
 export async function runWithLoggingContext<T>(
   fn: () => Promise<T>,
-  defaultContext?: LogContext,
-): Promise<T> {
-  const logger = createLogger(defaultContext);
+  defaultContext?: WideEvent,
+  options?: { rethrow?: boolean },
+): Promise<T | undefined> {
+  const store = createStore(defaultContext);
+  const shouldRethrow = options?.rethrow ?? true;
 
-  return storage.run(logger, async () => {
+  return storage.run(store, async () => {
     try {
       const result = await fn();
-      logger.emit();
+      store.facade.emit();
       return result;
     } catch (error) {
-      logger.error(error as Error);
-      logger.emit();
-      throw error;
+      store.facade.error(error as Error);
+      store.facade.emit();
+      if (shouldRethrow) throw error;
+      return undefined;
     }
   });
 }
-
-export function UseLoggingContext(defaultContext?: LogContext): MethodDecorator {
-  return (_target, _propertyKey, descriptor: PropertyDescriptor) => {
-    const original = descriptor.value;
-
-    descriptor.value = function (...args: any[]) {
-      return runWithLoggingContext(() => original.apply(this, args), defaultContext);
-    };
-
-    return descriptor;
-  };
-}
 ```
 
-#### Usage with a NestJS class method
+This gives us one reusable lifecycle for HTTP requests, scheduled jobs, workers, and message consumers.
+
+#### HTTP requests
+
+`LoggingContextMiddleware` creates a logging store for every HTTP request and seeds Datadog's `http` namespace:
 
 ```typescript
-@UseLoggingContext({ source: 'sqs-worker', queue: 'orders' })
-async processMessage(message: OrderMessage) {
-    const logger = useLogger();
-    logger.assign({ orderId: message.id, attempt: message.retryCount });
+const requestId = req.header('x-request-id') ?? crypto.randomUUID();
 
-    // Business logic executes here.
-    // On completion or error, the decorator automatically emits
-    // a single Wide Event containing all accumulated context.
+const store = createStore({
+  http: {
+    method: req.method,
+    request_id: requestId,
+    url: req.originalUrl || req.url,
+  },
+});
+```
+
+When the response finishes, the middleware emits the event with `http.status_code`:
+
+```typescript
+res.on('finish', () => {
+  useLogger().emit({ http: { status_code: res.statusCode } });
+});
+```
+
+The app wires this middleware globally:
+
+```typescript
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer.apply(LoggingContextMiddleware).forRoutes('*');
+  }
 }
 ```
 
-#### Usage with a Kafka consumer (`@confluentinc/kafka-javascript`)
+#### Scheduled jobs and workers
 
-For non-class entry points like a Kafka `eachMessage` handler, the `runWithLoggingContext` function is used directly:
+Class-based entry points use `@UseLoggingContext(...)`:
+
+```typescript
+@Cron('* * * * *')
+@UseLoggingContext({ source: 'cron', job: 'syncUsers' }, { rethrow: false })
+async handleSync() {
+  const log = useLogger();
+
+  log.set({
+    sync: {
+      startedAt: new Date().toISOString(),
+    },
+  });
+
+  await this.syncUsersWorker.run();
+
+  log.set({
+    sync: {
+      status: 'ok',
+    },
+  });
+}
+```
+
+`rethrow` defaults to `true`. Setting `{ rethrow: false }` records and emits the error while preventing recurring schedulers from crashing the process.
+
+#### Message consumers
+
+Function-based entry points use `runWithLoggingContext(...)` directly:
 
 ```typescript
 await consumer.run({
@@ -109,56 +200,101 @@ await consumer.run({
       async () => {
         const log = useLogger();
         const payload = JSON.parse(message.value.toString());
-        log.set({ eventType: payload.type, user: { id: payload.userId } });
+
+        log.set({
+          event: { type: payload.type },
+          user: { id: payload.userId },
+        });
+
         await processEvent(payload);
       },
-      { source: 'kafka', kafka: { topic, offset: message.offset } },
+      {
+        source: 'kafka',
+        kafka: { topic, partition, offset: message.offset },
+      },
     ),
 });
 ```
 
-### 2.3 Context Payload Convention
+### 2.4 Final Event Shape
 
-To get the full benefit of Wide Events, the shape of the context payload must be consistent across services. Without a convention, teams will inevitably diverge — one service logging `userId`, another `user_id`, another `uid` — and the ability to query across services breaks down.
+The logger builds the final event with Datadog conventions in mind.
 
-The proposed convention is to **group context fields under a resource namespace**, following the pattern `{ <resource>: { <properties> } }`. Each top-level key represents a domain resource or infrastructure component, and its value is an object containing the relevant properties for that resource in the current unit of work.
+1. `duration` is owned by the logger and emitted in nanoseconds, matching Datadog's standard duration unit.
+2. Datadog-recognized namespaces stay top-level: `db`, `dd`, `error`, `http`, `logger`, `network`, `span_id`, `trace_id`, and `usr`.
+3. `message` stays top-level.
+4. All other application context is grouped under `ctx`.
+5. If application code tries to set `duration`, it is moved under `ctx.duration` so it does not conflict with logger-owned duration.
+
+For example, application code may accumulate this context:
+
+```typescript
+log.set({
+  source: { layer: 'controller' },
+  route: { name: 'get-user-orders' },
+  user: { id: 'usr_pro', plan: 'pro' },
+  orders: { count: 2, totalRevenue: 6298 },
+});
+```
+
+The resulting production log is a Pino JSON event shaped like this:
+
+```json
+{
+  "status": "info",
+  "time": 1777824000000,
+  "duration": 42450000,
+  "http": {
+    "method": "GET",
+    "request_id": "7b9f3a57-3d4d-4a90-b7c8-18c4d4674ab3",
+    "url": "/users/usr_pro/orders",
+    "status_code": 200
+  },
+  "ctx": {
+    "source": { "layer": "controller" },
+    "route": { "name": "get-user-orders" },
+    "user": { "id": "usr_pro", "plan": "pro" },
+    "orders": { "count": 2, "totalRevenue": 6298 }
+  }
+}
+```
+
+In Datadog, the business fields are queryable under `@ctx.*`, for example `@ctx.user.id`, `@ctx.user.plan`, `@ctx.route.name`, and `@ctx.orders.count`. Datadog-specific fields such as `@http.status_code`, `@duration`, and `@status` remain in their expected locations.
+
+### 2.5 Context Payload Convention
+
+To get the full benefit of Wide Events, the shape of the context payload must be consistent across services. Without a convention, teams will diverge, for example one service logging `userId`, another `user_id`, and another `uid`.
+
+The proposed convention is to group application context under resource namespaces before it reaches the final `ctx` object. Each key represents a domain resource, workflow, route, or infrastructure component, and each value contains the relevant properties for that unit of work.
 
 #### Convention rules
 
-1. **Every piece of context belongs under a resource key.** There should be no loose top-level fields like `userId` or `kafkaTopic`. Instead, the user's ID goes under `user`, the Kafka metadata goes under `kafka`, and so on.
-2. **Resource keys are singular nouns** in camelCase: `user`, `order`, `cart`, `kafka`, `s3`, `subscription`.
-3. **Property keys within a resource are short and direct**: `id`, `email`, `plan`, `topic`, `offset`, `bucket`, `key`. No redundant prefixes — `user.id` is self-explanatory, `user.userId` is not.
-4. **Domain entities specific to the service follow the same pattern.** If a service manages invoices, the context uses `invoice: { id, status, total }`, not `invoiceId`, `invoiceStatus`, `invoiceTotal`.
+1. Application context should use resource keys such as `user`, `order`, `route`, `sync`, `kafka`, `s3`, or `subscription`.
+2. Resource keys should be singular nouns in camelCase unless the domain concept is naturally plural, such as `orders` for an aggregate result.
+3. Property keys within a resource should be short and direct: `id`, `email`, `plan`, `topic`, `offset`, `bucket`, `key`.
+4. Do not duplicate the resource name inside the property: use `user.id`, not `user.userId`.
+5. Use Datadog-reserved top-level namespaces only when intentionally targeting Datadog semantics.
 
 #### Examples
-
-**User and subscription context** (set early in the request lifecycle):
 
 ```typescript
 log.set({
   user: { id: 'usr_8f2k', plan: 'pro', role: 'admin' },
-  subscription: { id: 'sub_3x9w', status: 'active', trialEndsAt: '2026-05-01' },
+  subscription: { id: 'sub_3x9w', status: 'active' },
 });
 ```
-
-**Kafka consumer metadata** (set via default context in `runWithLoggingContext`):
 
 ```typescript
 runWithLoggingContext(handler, {
   source: 'kafka',
-  kafka: { topic: 'order-events', partition: 3, offset: '18472', consumerGroup: 'order-processors' },
+  kafka: {
+    topic: 'order-events',
+    partition: 3,
+    offset: '18472',
+    consumerGroup: 'order-processors',
+  },
 });
 ```
-
-**S3 interaction** (set when an upload or fetch occurs):
-
-```typescript
-log.set({
-  s3: { bucket: 'company-uploads', key: 'avatars/usr_8f2k/profile.jpg', sizeBytes: 245891 },
-});
-```
-
-**Domain entity** (set by the service's business logic):
 
 ```typescript
 log.set({
@@ -167,150 +303,129 @@ log.set({
 });
 ```
 
-#### Resulting Wide Event
+### 2.6 Structured Error Handling
 
-When the unit of work completes, all of these calls merge into a single flat JSON event. A Kafka consumer processing an order might produce:
+The logger module includes shared error types and serialization utilities.
 
-```json
-{
-  "level": "info",
-  "source": "kafka",
-  "duration": 142,
-  "kafka": { "topic": "order-events", "partition": 3, "offset": "18472", "consumerGroup": "order-processors" },
-  "user": { "id": "usr_8f2k", "plan": "pro", "role": "admin" },
-  "order": { "id": "ord_7k3m", "status": "completed", "itemCount": 3, "total": 9999 },
-  "payment": { "provider": "stripe", "chargeId": "ch_1N2x", "method": "card" }
+```typescript
+export class AppError extends Error {
+  why: string;
+  fix: string;
+
+  constructor(params: {
+    message: string;
+    why: string;
+    fix: string;
+    cause?: Error;
+  }) {
+    super(params.message, { cause: params.cause });
+    this.name = 'AppError';
+    this.why = params.why;
+    this.fix = params.fix;
+  }
 }
 ```
 
-In Datadog, every nested field becomes a queryable facet: `@user.plan`, `@order.status`, `@kafka.topic`, `@payment.provider`. This is what makes cross-service queries possible — because every service that touches a `user` logs it under `user.id`, not a service-specific variation.
-
-### 2.4 Structured Error Handling
-
-One of the problems described in Section 1 is that errors are logged inconsistently and Datadog loses the cause chain. To solve this, we introduce a shared `AppError` class and a serialization utility that together enforce a uniform error shape across all services.
-
-#### The `AppError` class
-
-Every error thrown in application code should be an `AppError` (or wrapped in one). It extends the native `Error` with two mandatory context fields — `why` (root cause in plain language) and `fix` (a concrete remediation step) — and supports the standard `cause` property for chaining underlying errors.
+`ProblemDetail` extends `AppError` for HTTP-facing failures. It adds `status`, optional `type`, optional `instance`, and a `toJSON()` method that returns an RFC 7807-style response body:
 
 ```typescript
-export type ErrorCtx = {
-  why: string;
-  fix: string;
-};
+throw new ProblemDetail({
+  title: 'Payment failed',
+  status: 402,
+  why: 'Card declined by issuer',
+  fix: 'Try a different payment method',
+});
+```
 
+The global exception filter converts thrown errors to `ProblemDetail`, logs the error through the active request context when available, and returns the problem response:
+
+```typescript
+@Catch()
+export class AppExceptionFilter implements ExceptionFilter {
+  catch(exception: unknown, host: ArgumentsHost) {
+    const http = host.switchToHttp();
+    const req = http.getRequest<Request>();
+    const res = http.getResponse<Response>();
+
+    const error =
+      exception instanceof Error ? exception : new Error(String(exception));
+
+    try {
+      useLogger().error(error);
+    } catch {
+      // Logger is unavailable outside a request context, such as bootstrap errors.
+    }
+
+    const problem = ProblemDetail.from(error, req.originalUrl || req.url);
+    res.status(problem.status).json(problem.toJSON());
+  }
+}
+```
+
+`serializeError(...)` preserves the full cause chain:
+
+```typescript
 export type SerializedError = {
   message: string;
   kind: string;
   stack: string | undefined;
+  why?: string;
+  fix?: string;
+  status?: number;
   cause?: SerializedError;
 };
-
-type CreateErrorParams = Pick<Error, 'message' | 'cause'> & ErrorCtx;
-
-export class AppError extends Error {
-  ctx: ErrorCtx;
-
-  constructor({ message, why, fix, cause }: CreateErrorParams) {
-    super(message, { cause });
-    this.name = 'AppError';
-    this.ctx = { why, fix };
-  }
-}
-
-export function createError(params: CreateErrorParams): AppError {
-  return new AppError(params);
-}
-
-export function serializeError(err: Error): SerializedError {
-  const result: SerializedError = { message: err.message, kind: err.name, stack: err.stack };
-  if (err.cause instanceof Error) result.cause = serializeError(err.cause);
-  return result;
-}
 ```
 
-The `createError` factory is the preferred way to instantiate errors throughout the codebase. It keeps call sites concise and makes it easy to enforce the `why`/`fix` contract at the type level — a developer cannot create an `AppError` without providing both fields.
-
-#### Usage example
-
-```typescript
-const user = await db.findUser(userId);
-if (!user) {
-  throw createError({
-    message: 'User not found',
-    why: 'No user record exists for the given ID',
-    fix: 'Verify the user ID is correct and the account has not been deleted',
-  });
-}
-
-try {
-  await stripe.charges.create({ amount: order.total, customer: user.stripeId });
-} catch (err) {
-  throw createError({
-    message: 'Payment failed',
-    why: 'Stripe charge was declined by the card issuer',
-    fix: 'Retry with a different payment method or contact the cardholder',
-    cause: err,
-  });
-}
-```
-
-In the second example, the original Stripe SDK error is preserved as the `cause`. When serialized, the full chain is retained — something Datadog's default error handling discards.
-
-#### The Datadog drain
-
-To get these structured errors into Datadog, we use a custom Evlog drain that writes NDJSON to stdout (where the Datadog agent picks it up). The drain calls `serializeError` to recursively flatten the entire cause chain into a queryable JSON structure:
-
-```typescript
-type DatadogLog = {
-  message: string;
-  status: string;
-  ctx: Record<string, unknown>;
-  error?: SerializedError;
-};
-
-function datadogDrain({ event }: DrainContext) {
-  const { message = '', level, error, ...rest } = event;
-  const err = error as Error | undefined;
-
-  const log: DatadogLog = {
-    message: err?.message ?? (message as string),
-    status: level,
-    ctx: rest,
-  };
-
-  if (err) log.error = serializeError(err);
-
-  process.stdout.write(JSON.stringify(log) + '\n');
-}
-```
-
-When a `payment failed` error is thrown with a Stripe cause, the resulting log event looks like this:
+When an error is logged, the final event includes a top-level `error` object for Datadog Error Tracking:
 
 ```json
 {
-  "message": "Payment failed",
   "status": "error",
-  "ctx": {
-    "source": "sqs-worker",
-    "user": { "id": "usr_8f2k", "plan": "pro" },
-    "order": { "id": "ord_7k3m", "total": 9999 }
+  "time": 1777824000000,
+  "duration": 38100000,
+  "http": {
+    "method": "GET",
+    "request_id": "7b9f3a57-3d4d-4a90-b7c8-18c4d4674ab3",
+    "url": "/checkout",
+    "status_code": 402
   },
   "error": {
     "message": "Payment failed",
-    "kind": "AppError",
-    "stack": "AppError: Payment failed\n    at processOrder (/src/orders/process.ts:42:11)...",
-    "cause": {
-      "message": "Your card was declined.",
-      "kind": "StripeCardError",
-      "stack": "StripeCardError: Your card was declined.\n    at ...",
-      "cause": null
-    }
+    "kind": "ProblemDetail",
+    "stack": "ProblemDetail: Payment failed\n    at AppService.checkout ...",
+    "why": "Card declined by issuer",
+    "fix": "Try a different payment method",
+    "status": 402
+  },
+  "ctx": {
+    "checkout": { "step": "charge" }
   }
 }
 ```
 
-Every level of the cause chain is preserved and queryable in Datadog: `@error.kind`, `@error.cause.kind`, `@error.cause.message`. This solves the problem described in Section 1 — engineers can see exactly what failed, why it failed at the application level, and what the underlying infrastructure error was, all in a single log entry.
+Every level of `error.cause` is recursively serialized when present, making nested failures queryable instead of relying on Datadog to infer cause chains from a single stack trace.
+
+### 2.7 NestJS Framework Logs
+
+The POC also provides `NestLogger`, an implementation of Nest's `LoggerService`:
+
+```typescript
+const app = await NestFactory.create(AppModule, { logger: new NestLogger() });
+```
+
+This keeps framework logs on the same Pino output path. Nest error logs map stack traces to `error.stack`, which is the field Datadog Error Tracking expects.
+
+### 2.8 Automatic Redaction
+
+Before any event reaches Pino, `core.log(...)` calls `redactWideEvent(...)`. This gives HTTP wide events, worker events, cron events, and direct Nest framework logs the same sanitization path.
+
+The current redaction layer intentionally stays small and built-in:
+
+1. Sensitive key redaction replaces values for keys such as `authorization`, `cookie`, `password`, `token`, `apiKey`, `privateKey`, `clientSecret`, and `ssn` with `[REDACTED]`, regardless of where they appear in the event tree.
+2. Smart string masking partially masks common high-risk values while preserving enough debugging signal: credit cards, email addresses, phone numbers, JWTs, and bearer tokens.
+3. The implementation is not configurable yet. If a service needs custom redaction paths or domain-specific regexes, that should be added behind a concrete requirement rather than preemptively expanding the logger API.
+
+For example, a context value like `user.email = "alice@example.com"` becomes `a***@***.com`, a phone number like `+1 555 123 4567` becomes `+1******67`, a credit card becomes `****1111`, and `headers.authorization` becomes `[REDACTED]`.
 
 ---
 
@@ -318,45 +433,51 @@ Every level of the cause chain is preserved and queryable in Datadog: `@error.ki
 
 ### 3.1 Enforced Consistency Across Teams
 
-The Wide Event pattern, combined with the context payload convention and structured error utilities, removes ambiguity from how teams log. Every service emits the same shape of output: one event per unit of work, with standardized resource-namespaced fields for identity, timing, errors, and business context. This consistency is enforced by the tooling and the convention rather than by code review alone.
+The Wide Event pattern, combined with the resource context convention and shared error utilities, removes ambiguity from how teams log. Every service emits one event per unit of work with standardized placement for status, duration, HTTP metadata, Datadog-reserved fields, business context, and errors.
 
 ### 3.2 Reduced Datadog Indexing Costs
 
-By collapsing multiple log lines per action into a single event, the total number of indexed log events in Datadog will decrease. The magnitude depends on the service, but any reduction in event count translates directly into lower indexing costs.
+By collapsing multiple log lines per action into a single completion event, the total number of indexed log events in Datadog should decrease. The exact savings depend on service behavior, but reducing event count directly reduces indexing volume.
 
 ### 3.3 Query-Driven Debugging
 
-With Wide Events, every field becomes a high-cardinality facet that Datadog can index and query natively. Instead of searching for a `user_id` and reading through scattered lines, engineers can run targeted queries such as: *"Show me all errors for premium-tier users who triggered the new checkout feature flag in the last 24 hours."*
+With Wide Events, engineers can query the final state of a unit of work instead of reconstructing it from scattered lines. Example Datadog queries include:
+
+```text
+@status:error @ctx.user.plan:pro @ctx.route.name:get-user-orders
+```
+
+```text
+@http.status_code:402 @error.kind:ProblemDetail @ctx.checkout.step:charge
+```
 
 ### 3.4 Structured, Actionable Errors
 
-The `AppError` class and `serializeError` utility enforce a consistent error format with `why`, `fix`, and a fully preserved cause chain. When an error occurs, the Wide Event contains the full execution context — stack trace, user state, request payload, downstream latency — alongside these structured error fields, all in a single record. This eliminates guesswork and makes errors immediately actionable, both for engineers and for automated agents.
+`AppError`, `ProblemDetail`, and `serializeError` enforce a consistent error format with `why`, `fix`, HTTP status when applicable, stack trace, and recursive cause serialization. This makes errors more useful for engineers and for automated agents that need machine-readable failure context.
 
 ### 3.5 Automatic PII Redaction
 
-Evlog includes built-in automatic redaction that scrubs personally identifiable information from events before they reach console output or any external drain. In production (`NODE_ENV === 'production'`), redaction is enabled by default with no configuration required.
+Sensitive values are sanitized centrally in the logger before Pino emits the event. This reduces the chance that rich context accumulation accidentally sends credentials, tokens, payment data, email addresses, phone numbers, or other PII to Datadog.
 
-Rather than replacing values with a flat `[REDACTED]` string, Evlog applies smart partial masking that preserves enough context for debugging while protecting the actual data. Built-in patterns cover credit card numbers, email addresses, IPv4 addresses, phone numbers, JWTs, bearer tokens, and IBANs. For example, an email like `alice@example.com` is masked to `a***@***.com`, and a credit card number is reduced to `****1111`.
+### 3.6 Minimal Runtime Dependency
 
-Teams can extend the built-in patterns with custom redaction paths (e.g., `user.password`, `headers.authorization`) and custom regex patterns for domain-specific sensitive fields. This means that as services accumulate richer context in their Wide Events, the risk of accidentally persisting PII in Datadog is mitigated at the library level rather than relying on individual developers to remember to sanitize their log calls.
+The POC does not depend on a specialized wide-event logging framework. It uses Pino for high-performance JSON emission and keeps the company-specific behavior in a small module that we own. This makes the API easier to standardize internally and reduces the risk of being locked into a third-party abstraction.
+
+### 3.7 Better Local Development Output
+
+Development mode uses a custom pretty destination so developers can read logs easily while still exercising the same JSON event shape Pino emits in production. This avoids a common failure mode where local logs look useful but production logs have a different structure.
 
 ---
 
 ## 4. Rollout Plan
 
-**Proof of Concept.** Select one microservice and instrument it with Wide Events alongside existing logging in a separate branch and deploy to dev for a few days and play with queries using this new format. This phase also serves to validate the `@UseLoggingContext()` wrapper and `runWithLoggingContext` utility working as expected and matching Datadog's output format.
+**Proof of Concept.** Use this repository to validate the logger module against representative flows: HTTP controller and service calls, handled HTTP errors, scheduled cron jobs, worker calls, and future message consumer examples. Confirm the emitted JSON shape in production mode matches Datadog expectations.
 
-**Automated Migration.** Once the PoC confirms the expected improvements, provide teams with a Claude Code skill that automates adoption across remaining services. The skill will install dependencies, inject the async context utility, and refactor entry points to use the new logging pattern — requiring minimal manual effort from each team.
+**Datadog Validation.** Deploy one instrumented service or sandbox build to a development environment. Validate facets, queries, Error Tracking behavior, `duration` units, `http.*` parsing, and `ctx.*` business context indexing.
 
----
+**Production Readiness.** Before broader rollout, add or confirm remaining production controls: payload size guidance, sampling policy if needed, and service-level conventions for common resources such as `user`, `account`, `subscription`, `order`, `route`, and `kafka`.
 
-## 5. Risks and Mitigations
-
-| Risk | Mitigation |
-|------|------------|
-| Large event payloads for complex workflows | Enforce a maximum field policy and exclude verbose payloads (e.g., full request bodies) by default; Evlog supports sampling to control volume further |
-| Adoption resistance from teams | The automated Claude Code skill reduces the migration to a single command; no manual refactoring required |
-| Evlog library maturity | The library is actively maintained with regular releases and a growing community; our custom wrapper abstracts Evlog behind our own interface, allowing us to swap implementations without service-level changes if needed |
+**Automated Migration.** Once the POC confirms the expected improvements, provide teams with an automation workflow that installs dependencies, wires `LoggingContextMiddleware`, configures `NestLogger`, introduces shared error types, and refactors entry points to use `useLogger().set(...)` and `runWithLoggingContext(...)`.
 
 ---
 

@@ -1,6 +1,7 @@
 import pino from 'pino';
 import type { WideEvent, LogLevel } from './types';
 import { createPrettyDestination } from './pretty';
+import { redactWideEvent } from './redact';
 
 const isDev = process.env.NODE_ENV !== 'production';
 
@@ -18,5 +19,6 @@ const logger = pino(
 );
 
 export function log(level: LogLevel, data: WideEvent): void {
+  redactWideEvent(data);
   logger[level](data);
 }
