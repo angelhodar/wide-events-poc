@@ -1,9 +1,11 @@
 import pino from 'pino';
 import type { WideEvent, LogLevel } from './types';
-import { createPrettyDestination } from './pretty';
+import {
+  createPrettyDestination,
+  createPrettyOptions,
+  isPrettyEnabled,
+} from './pretty';
 import { redactWideEvent } from './redact';
-
-const isDev = process.env.NODE_ENV !== 'production';
 
 const logger = pino(
   {
@@ -14,8 +16,10 @@ const logger = pino(
       level: (label) => ({ status: label }),
     },
   },
-  // Keep pino as the only emit path; dev prettiness is just another destination.
-  isDev ? createPrettyDestination() : pino.destination(1),
+  // Keep pino as the only emit path; prettiness is just another destination.
+  isPrettyEnabled(process.env)
+    ? createPrettyDestination(createPrettyOptions(process.env))
+    : pino.destination(1),
 );
 
 export function log(level: LogLevel, data: WideEvent): void {

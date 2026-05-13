@@ -8,6 +8,8 @@ const color = {
   red: '\x1B[31m',
   green: '\x1B[32m',
   yellow: '\x1B[33m',
+  blue: '\x1B[34m',
+  magenta: '\x1B[35m',
   cyan: '\x1B[36m',
 };
 
@@ -16,6 +18,16 @@ const levelColor: Record<LogLevel, string> = {
   warn: color.yellow,
   error: color.red,
 };
+
+export const appColor = {
+  blue: color.blue,
+  cyan: color.cyan,
+  green: color.green,
+  magenta: color.magenta,
+  yellow: color.yellow,
+} as const;
+
+export type PrettyColor = keyof typeof appColor;
 
 const systemFields = new Set([
   'ctx',
@@ -37,6 +49,29 @@ type PrettyEvent = WideEvent & {
   status?: string;
   time?: number | string;
 };
+
+export type PrettyOptions = {
+  appName: string;
+  color: PrettyColor;
+};
+
+export function isPrettyEnabled(env: NodeJS.ProcessEnv): boolean {
+  return env.LOGGER_PRETTY?.toLowerCase() === 'true';
+}
+
+export function parsePrettyColor(value: string | undefined): PrettyColor {
+  const candidate = value?.toLowerCase();
+  return candidate && candidate in appColor
+    ? (candidate as PrettyColor)
+    : 'cyan';
+}
+
+export function createPrettyOptions(env: NodeJS.ProcessEnv): PrettyOptions {
+  return {
+    appName: env.LOGGER_APP_NAME ?? 'app',
+    color: parsePrettyColor(env.LOGGER_COLOR),
+  };
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -114,13 +149,13 @@ function pushError(
   }
 }
 
-export function prettyPrint(event: PrettyEvent): void {
+export function prettyPrint(event: PrettyEvent, options: PrettyOptions): void {
   const level = (event.status ?? 'info') as LogLevel;
-  const service = process.env.DD_SERVICE ?? process.env.SERVICE_NAME ?? 'app';
   const http = isRecord(event.http) ? event.http : undefined;
   const fields: [string, unknown][] = [];
+  const serviceColor = level === 'info' ? appColor[options.color] : color.cyan;
 
-  let header = `${color.dim}${formatTime(event.time)}${color.reset} ${levelColor[level] ?? color.reset}${String(level).toUpperCase()}${color.reset} ${color.cyan}[${service}]${color.reset}`;
+  let header = `${color.dim}${formatTime(event.time)}${color.reset} ${levelColor[level] ?? color.reset}${String(level).toUpperCase()}${color.reset} ${serviceColor}[${options.appName}]${color.reset}`;
 
   if (typeof http?.method === 'string' && typeof http.url === 'string') {
     header += ` ${http.method} ${http.url}`;
@@ -166,12 +201,14 @@ export function prettyPrint(event: PrettyEvent): void {
   process.stdout.write(`${lines.join('\n')}\n`);
 }
 
-export function createPrettyDestination(): pino.DestinationStream {
+export function createPrettyDestination(
+  options: PrettyOptions,
+): pino.DestinationStream {
   return {
     write(line: string) {
       try {
         // Pretty-print the exact JSON pino produced, including formatters/hooks.
-        prettyPrint(JSON.parse(line) as PrettyEvent);
+        prettyPrint(JSON.parse(line) as PrettyEvent, options);
       } catch {
         process.stdout.write(line.endsWith('\n') ? line : `${line}\n`);
       }
