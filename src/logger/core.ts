@@ -12,6 +12,7 @@ const logger = pino(
     // Let the Datadog Agent own host attribution; JSON hostname can override it.
     base: null,
     messageKey: 'message',
+    timestamp: false,
     formatters: {
       level: (label) => ({ status: label }),
     },

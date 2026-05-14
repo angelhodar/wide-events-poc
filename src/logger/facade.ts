@@ -21,6 +21,7 @@ const datadogContextKeys = new Set([
 function buildEvent(store: FacadeStore): WideEvent {
   const ctx: WideEvent = {};
   const event: WideEvent = {
+    timestamp: Date.now(),
     // Datadog's standard duration field is nanoseconds, not milliseconds.
     duration: Math.round((performance.now() - store.startedAt) * 1_000_000),
   };
