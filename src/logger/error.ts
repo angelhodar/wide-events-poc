@@ -9,7 +9,6 @@ export type SerializedError = {
 };
 
 type AppErrorParams = {
-  message: string;
   why: string;
   fix: string;
   cause?: Error;
@@ -20,7 +19,7 @@ export class AppError extends Error {
   fix: string;
 
   constructor(params: AppErrorParams) {
-    super(params.message, { cause: params.cause });
+    super(params.why, { cause: params.cause });
     this.name = 'AppError';
     this.why = params.why;
     this.fix = params.fix;
@@ -44,7 +43,6 @@ export class ProblemDetail extends AppError {
 
   constructor(params: ProblemDetailParams) {
     super({
-      message: params.title,
       why: params.why,
       fix: params.fix,
       cause: params.cause,
