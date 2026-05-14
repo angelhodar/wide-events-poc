@@ -1,5 +1,5 @@
 import { log } from './core';
-import { serializeError } from './error';
+import { serializeError, type SerializedError } from './error';
 import { mergeInto } from './helpers';
 import type { LoggerFacade, LoggingStore, WideEvent } from './types';
 
@@ -37,6 +37,13 @@ function buildEvent(store: FacadeStore): WideEvent {
     } else {
       ctx[key] = value;
     }
+  }
+
+  // Datadog's log row uses top-level `message`. On the error path nobody sets
+  // one, so default from the error's why/message to avoid rendering raw JSON.
+  if (!event.message && event.error) {
+    const err = event.error as SerializedError;
+    event.message = err.why ?? err.message;
   }
 
   if (Object.keys(ctx).length > 0) event.ctx = ctx;
