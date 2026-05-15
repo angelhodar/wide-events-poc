@@ -2,12 +2,16 @@ import type { LoggerService } from '@nestjs/common';
 import { log } from './core';
 
 export class NestLogger implements LoggerService {
+  debug(message: string, ...params: unknown[]) {
+    log.debug({ message, context: lastString(params) });
+  }
+
   log(message: string, ...params: unknown[]) {
-    log('info', { message, context: lastString(params) });
+    log.info({ message, context: lastString(params) });
   }
 
   warn(message: string, ...params: unknown[]) {
-    log('warn', { message, context: lastString(params) });
+    log.warn({ message, context: lastString(params) });
   }
 
   error(message: string, ...params: unknown[]) {
@@ -17,7 +21,7 @@ export class NestLogger implements LoggerService {
       params.length >= 2 && typeof params[0] === 'string'
         ? params[0]
         : undefined;
-    log('error', {
+    log.error({
       message,
       context,
       // Datadog Error Tracking expects stack traces under error.stack.

@@ -14,6 +14,7 @@ const color = {
 };
 
 const levelColor: Record<LogLevel, string> = {
+  debug: color.magenta,
   info: color.cyan,
   warn: color.yellow,
   error: color.red,
@@ -39,6 +40,7 @@ const systemFields = new Set([
   'message',
   'pid',
   'status',
+  'timestamp',
   'time',
 ]);
 
@@ -47,6 +49,7 @@ type PrettyEvent = WideEvent & {
   duration?: number;
   http?: Record<string, unknown>;
   status?: string;
+  timestamp?: number | string;
   time?: number | string;
 };
 
@@ -155,7 +158,7 @@ export function prettyPrint(event: PrettyEvent, options: PrettyOptions): void {
   const fields: [string, unknown][] = [];
   const serviceColor = level === 'info' ? appColor[options.color] : color.cyan;
 
-  let header = `${color.dim}${formatTime(event.time)}${color.reset} ${levelColor[level] ?? color.reset}${String(level).toUpperCase()}${color.reset} ${serviceColor}[${options.appName}]${color.reset}`;
+  let header = `${color.dim}${formatTime(event.timestamp ?? event.time)}${color.reset} ${levelColor[level] ?? color.reset}${String(level).toUpperCase()}${color.reset} ${serviceColor}[${options.appName}]${color.reset}`;
 
   if (typeof http?.method === 'string' && typeof http.url === 'string') {
     header += ` ${http.method} ${http.url}`;

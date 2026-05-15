@@ -1,4 +1,4 @@
-export type LogLevel = 'info' | 'warn' | 'error';
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
 export type WideEvent = {
   message?: string;
@@ -12,6 +12,7 @@ export type LoggingContextOptions = {
 
 export type LoggerFacade = {
   set(data: WideEvent): void;
+  debug(message: string, context?: WideEvent): void;
   info(message: string, context?: WideEvent): void;
   warn(message: string, context?: WideEvent): void;
   error(error: Error | string, context?: WideEvent): void;

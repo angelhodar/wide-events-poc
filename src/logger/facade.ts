@@ -21,7 +21,6 @@ const datadogContextKeys = new Set([
 function buildEvent(store: FacadeStore): WideEvent {
   const ctx: WideEvent = {};
   const event: WideEvent = {
-    timestamp: Date.now(),
     // Datadog's standard duration field is nanoseconds, not milliseconds.
     duration: Math.round((performance.now() - store.startedAt) * 1_000_000),
   };
@@ -51,10 +50,25 @@ function buildEvent(store: FacadeStore): WideEvent {
   return event;
 }
 
+function buildDebugEvent(
+  store: FacadeStore,
+  message: string,
+  context?: WideEvent,
+): WideEvent {
+  return buildEvent({
+    ...store,
+    context: { ...store.context, ...context, message },
+  });
+}
+
 export function createFacade(store: FacadeStore): LoggerFacade {
   return {
     set(data: WideEvent) {
       mergeInto(store.context, data);
+    },
+
+    debug(message: string, context?: WideEvent) {
+      log.debug(buildDebugEvent(store, message, context));
     },
 
     info(message: string, context?: WideEvent) {

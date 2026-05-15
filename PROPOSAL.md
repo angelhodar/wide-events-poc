@@ -34,41 +34,17 @@ This approach optimizes logs for querying instead of for writing. Rather than sc
 
 The POC uses **Pino** as the only emit path.
 
-```typescript
-const logger = pino(
-  {
-    base: null,
-    messageKey: 'message',
-    formatters: {
-      level: (label) => ({ status: label }),
-    },
-  },
-  process.env.NODE_ENV !== 'production'
-    ? createPrettyDestination()
-    : pino.destination(1),
-);
-```
-
 The implementation intentionally keeps the logging abstraction small:
 
 1. `pino` writes production JSON to stdout for the Datadog Agent.
-2. Development mode uses a custom pretty destination, but it pretty-prints the exact JSON Pino produced.
-3. `base: null` avoids emitting host metadata that can override Datadog Agent attribution.
-4. Pino's level formatter maps log levels to Datadog's `status` field.
-5. The message key is explicitly `message`; the `WideEvent` type prevents accidental use of Pino's default `msg` field.
+2. Local pretty output is available without changing the production JSON event shape.
+3. Log levels map to Datadog's `status` field for native filtering and dashboards.
+4. Logs use a top-level `message` and `timestamp` consistently across application, framework, and direct logger output.
+5. `LOG_LEVEL` controls verbosity, including whether debug breadcrumbs are emitted.
 
 ### 2.2 Logger Module API
 
-The public API exported from `src/logger/index.ts` is:
-
-```typescript
-export { useLogger, runWithLoggingContext } from './context';
-export { AppError, ProblemDetail, serializeError } from './error';
-export type { WideEvent, LoggingContextOptions } from './types';
-export { LoggingContextMiddleware } from './middleware';
-export { UseLoggingContext } from './decorator';
-export { NestLogger } from './nest-logger';
-```
+The public API exposes context-aware logging for units of work, a direct logger for modules outside a request or job context, shared error types, NestJS wiring, and reusable lifecycle helpers.
 
 Application code normally uses `useLogger()` inside an active logging context:
 
@@ -82,11 +58,12 @@ log.set({
 });
 ```
 
-The `LoggerFacade` supports these operations:
+The context-aware logger supports these operations:
 
 ```typescript
 type LoggerFacade = {
   set(data: WideEvent): void;
+  debug(message: string, context?: WideEvent): void;
   info(message: string, context?: WideEvent): void;
   warn(message: string, context?: WideEvent): void;
   error(error: Error | string, context?: WideEvent): void;
@@ -95,7 +72,18 @@ type LoggerFacade = {
 };
 ```
 
-`set(...)` is the primary API for accumulating context. It deep-merges plain objects and ignores `null` or `undefined` values. `warn(...)` marks the final event as `warn`. `error(...)` marks the final event as `error` and stores a serialized error. `emit(...)` flushes the event once and ignores later emit attempts for the same context.
+`set(...)` is the primary API for accumulating context. `debug(...)` emits an immediate diagnostic breadcrumb using the current context. `warn(...)` and `error(...)` escalate the final unit-of-work event. `emit(...)` flushes the final event once.
+
+For code outside an active logging context, the module also exports a direct method-style logger:
+
+```typescript
+import { log } from './logger';
+
+log.debug({ message: 'Cache miss', cache: { key } });
+log.info({ message: 'Worker started', worker: { name: 'sync-users' } });
+log.warn({ message: 'Retrying provider call', provider: 'stripe' });
+log.error({ message: 'Provider failed', error: serializeError(err) });
+```
 
 ### 2.3 Context Lifecycle
 
@@ -126,6 +114,19 @@ export async function runWithLoggingContext<T>(
 ```
 
 This gives us one reusable lifecycle for HTTP requests, scheduled jobs, workers, and message consumers.
+
+#### Debug breadcrumbs
+
+Wide Events remain the default: each unit of work emits one final event. Debug logs are supported as immediate breadcrumbs for point-in-time diagnostics, while still carrying the active context for correlation:
+
+```typescript
+const log = useLogger();
+
+log.set({ user: { id }, route: { name: 'get-user-orders' } });
+log.debug('Cache miss', { cache: { key: `orders:${id}` } });
+```
+
+Debug breadcrumbs are controlled by `LOG_LEVEL`. They do not replace `set(...)` for data that belongs on the final unit-of-work summary, and they do not change the final event level.
 
 #### HTTP requests
 
@@ -225,6 +226,7 @@ The logger builds the final event with Datadog conventions in mind.
 3. `message` stays top-level.
 4. All other application context is grouped under `ctx`.
 5. If application code tries to set `duration`, it is moved under `ctx.duration` so it does not conflict with logger-owned duration.
+6. `timestamp` is emitted by Pino for every log path, including framework logs, direct logs, and final wide events.
 
 For example, application code may accumulate this context:
 
@@ -242,7 +244,7 @@ The resulting production log is a Pino JSON event shaped like this:
 ```json
 {
   "status": "info",
-  "time": 1777824000000,
+  "timestamp": 1777824000000,
   "duration": 42450000,
   "http": {
     "method": "GET",
@@ -313,18 +315,19 @@ export class AppError extends Error {
   fix: string;
 
   constructor(params: {
-    message: string;
     why: string;
     fix: string;
     cause?: Error;
   }) {
-    super(params.message, { cause: params.cause });
+    super(params.why, { cause: params.cause });
     this.name = 'AppError';
     this.why = params.why;
     this.fix = params.fix;
   }
 }
 ```
+
+`why` is the sole human-readable string on `AppError`, which keeps call sites concise while preserving standard JavaScript error behavior through `err.message`.
 
 `ProblemDetail` extends `AppError` for HTTP-facing failures. It adds `status`, optional `type`, optional `instance`, and a `toJSON()` method that returns an RFC 7807-style response body:
 
@@ -381,7 +384,7 @@ When an error is logged, the final event includes a top-level `error` object for
 ```json
 {
   "status": "error",
-  "time": 1777824000000,
+  "timestamp": 1777824000000,
   "duration": 38100000,
   "http": {
     "method": "GET",
@@ -390,9 +393,9 @@ When an error is logged, the final event includes a top-level `error` object for
     "status_code": 402
   },
   "error": {
-    "message": "Payment failed",
+    "message": "Card declined by issuer",
     "kind": "ProblemDetail",
-    "stack": "ProblemDetail: Payment failed\n    at AppService.checkout ...",
+    "stack": "ProblemDetail: Card declined by issuer\n    at AppService.checkout ...",
     "why": "Card declined by issuer",
     "fix": "Try a different payment method",
     "status": 402
@@ -413,7 +416,7 @@ The POC also provides `NestLogger`, an implementation of Nest's `LoggerService`:
 const app = await NestFactory.create(AppModule, { logger: new NestLogger() });
 ```
 
-This keeps framework logs on the same Pino output path. Nest error logs map stack traces to `error.stack`, which is the field Datadog Error Tracking expects.
+This keeps framework logs on the same Pino output path as application logs, including consistent levels, timestamps, redaction, and error metadata.
 
 ### 2.8 Automatic Redaction
 
@@ -465,7 +468,7 @@ The POC does not depend on a specialized wide-event logging framework. It uses P
 
 ### 3.7 Better Local Development Output
 
-Development mode uses a custom pretty destination so developers can read logs easily while still exercising the same JSON event shape Pino emits in production. This avoids a common failure mode where local logs look useful but production logs have a different structure.
+Development mode uses a custom pretty destination so developers can read logs easily while still exercising the same JSON event shape Pino emits in production. This keeps local debugging readable without creating a separate logging path.
 
 ---
 
